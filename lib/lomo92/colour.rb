@@ -22,6 +22,11 @@ module Lomo92
       clamp01((image <= 0.0031308).ifthenelse(low, high))
     end
 
+    # Scalar version, for building lookup tables in plain Ruby.
+    def srgb_to_linear_scalar(v)
+      v <= 0.04045 ? v / 12.92 : (((v + 0.055) / 1.055)**2.4)
+    end
+
     def clamp01(image)
       image = (image < 0).ifthenelse(0, image)
       (image > 1).ifthenelse(1, image)

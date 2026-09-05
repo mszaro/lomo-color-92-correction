@@ -100,40 +100,170 @@ module Lomo92
       end
     end
 
-    # Estimate the frame's colour cast from bright, nearly grey pixels: white
-    # walls, pale stone, cloud.
+    # Anchor points for the tone-dependent balance, as linear luma. Packed toward
+    # the dark end because that is where the cast moves fastest and where the eye
+    # notices it.
+    TONE_ANCHORS = [0.004, 0.012, 0.032, 0.08, 0.18, 0.36, 0.65].freeze
+
+    # How aligned a band's colours must be before it counts as a cast rather
+    # than as scene colour, and the least an anchor is ever trusted.
+    # How much of the measured correction each anchor actually gets.
     #
-    # Bright on its own would fail. On a frame that is mostly sky the brightest
-    # pixels are the sky, and neutralising those would bleach it. Keeping only
-    # the least saturated of the bright set finds the white-ish things and steps
-    # over saturated ones. That is what makes this safer than grey-world here: it
-    # never assumes the scene averages grey, only that something white is in
-    # shot. A frame offering no such reference gets left alone.
-    def highlight_gains(strength, clamp)
+    # Shadows take the full amount: down there the film's cast dominates and
+    # there is little real colour to lose. Midtones take less, because that is
+    # where the subject lives and a cast and warm light are indistinguishable
+    # from a single frame. Correcting midtones as hard as shadows pushed them
+    # from too red straight through neutral to R/G 0.65.
+    ANCHOR_STRENGTH = [0.6, 1.0, 1.0, 0.9, 0.72, 0.65, 0.8].freeze
+
+    COHERENCE_FLOOR = 0.35
+    COHERENCE_FULL = 0.80
+    MIN_CONFIDENCE = 0.15
+
+    # Measure the cast separately at each tone anchor, rather than once for the
+    # whole frame.
+    #
+    # A single gain cannot fix a cast that changes with brightness, and on some
+    # rolls it changes a lot. One Portland roll measures neutral highlights but
+    # R/G 1.31 in the midtones and 2.16 in the shadows. Correcting its highlights
+    # with a global gain warms everything and drives those midtones further red,
+    # which is exactly the wrong direction.
+    #
+    # Each anchor gets its own gain, measured from the least saturated pixels
+    # near that brightness so genuinely coloured subjects do not drag it. The
+    # result is a per-channel curve, which is what a tone-dependent cast needs.
+    def tone_gains(strength, clamp, shadow_strength = 1.0)
       return nil if strength <= 0
-      cut = self.class.percentile(lumas.sort, 85)
-      bright = pixels.each_with_index
-                     .select { |px, i| lumas[i] >= cut && px.max < 0.97 }
-                     .map(&:first)
-      return nil if bright.size < 300
-      gains_from_neutral(bright, 40, 150, strength, clamp)
+      raw = TONE_ANCHORS.map { |anchor| neutral_at(anchor) }
+      return nil if raw.compact.size < 2
+
+      filled = fill_gaps(raw.map { |r| r && r[:mean] })
+      confidence = fill_gaps(raw.map { |r| r && r[:confidence] })
+      smoothed = smooth(filled)
+
+      smoothed.each_with_index.map do |mean, i|
+        s = strength * confidence[i] * ANCHOR_STRENGTH[i]
+        s *= shadow_strength if i <= 1
+        target = mean.sum / 3.0
+        mean.map do |m|
+          g = 1.0 + s * (target / [m, 1e-6].max - 1.0)
+          g.clamp(1.0 / clamp, clamp)
+        end
+      end
     end
 
-    # Balancing the highlights leaves the shadows where the film put them, and on
-    # this stock that is strongly yellow. Mid-shadow B/G measures 0.36 to 0.84 on
-    # the worst frames, where open shade lit by blue sky should sit above 1.0.
+    # Mean colour of the near-neutral pixels sitting around one brightness, plus
+    # how much that reading deserves to be trusted.
     #
-    # Correcting a dark point as well as a bright one makes this a two-point grey
-    # balance, which is a per-channel curve rather than one flat gain. That is
-    # the only thing that can fix a cast which differs between shadows and
-    # highlights, and it is why white balance sliders never quite land on these.
-    def shadow_gains(strength, clamp = 1.8, ceiling = 0.16)
-      return nil if strength <= 0
+    # Confidence asks whether a band's colour is a cast or the scene.
+    #
+    # Judging that by saturation alone does not work. In the shadows the cast is
+    # itself what makes pixels saturated, so treating saturated as untrustworthy
+    # throws away the very band most in need of correction. Portland shadows sat
+    # at R/G 2.6 for exactly that reason.
+    #
+    # What separates the two is direction, not amount. A cast pushes every pixel
+    # the same way, so their colour vectors line up. Real scene colour points all
+    # over: brick one way, foliage another, sky a third. So confidence is the
+    # alignment of those vectors, near 1 when a band shares one hue and near 0
+    # when it holds many.
+    def neutral_at(anchor, width: 0.55, sat_pct: 30, minimum: 400)
+      lo = anchor * (1.0 - width)
+      hi = anchor * (1.0 + width) + 0.004
       band = pixels.each_with_index
-                   .select { |_, i| lumas[i] > 0.006 && lumas[i] < ceiling }
+                   .select { |_, i| lumas[i] >= lo && lumas[i] < hi }
                    .map(&:first)
-      return nil if band.size < 500
-      gains_from_neutral(band, 60, 250, strength, clamp)
+      return nil if band.size < minimum
+
+      sats = band.map { |px| saturation(px) }
+      cut = self.class.percentile(sats.sort, sat_pct)
+      neutral = band.each_with_index.select { |_, i| sats[i] <= cut }.map(&:first)
+      return nil if neutral.size < minimum / 3
+
+      sums = neutral.each_with_object([0.0, 0.0, 0.0]) do |px, acc|
+        acc[0] += px[0]
+        acc[1] += px[1]
+        acc[2] += px[2]
+      end
+      mean = sums.map { |s| s / neutral.size }
+
+      { mean: mean, confidence: coherence_of(band) }
+    end
+
+    # How far a band's colours agree on a direction.
+    #
+    # Each pixel contributes a chroma vector; if they all point the same way the
+    # mean vector is as long as the average individual one and this returns 1.
+    # If they cancel out, it returns near 0. The whole band is used rather than
+    # the near-grey subset, since the question is about the band as a whole.
+    def coherence_of(band)
+      sum_r = 0.0
+      sum_b = 0.0
+      sum_len = 0.0
+      count = 0
+      band.each do |px|
+        y = luma(px)
+        next if y <= 1e-6
+        dr = (px[0] - y) / y
+        db = (px[2] - y) / y
+        len = Math.sqrt(dr * dr + db * db)
+        next if len < 1e-4
+        sum_r += dr
+        sum_b += db
+        sum_len += len
+        count += 1
+      end
+      return MIN_CONFIDENCE if count < 50 || sum_len <= 1e-6
+
+      aligned = Math.sqrt(sum_r * sum_r + sum_b * sum_b) / sum_len
+      ((aligned - COHERENCE_FLOOR) /
+       (COHERENCE_FULL - COHERENCE_FLOOR)).clamp(MIN_CONFIDENCE, 1.0)
+    end
+
+    # Anchors with too few pixels borrow from their nearest measured neighbour.
+    def fill_gaps(values)
+      return values if values.all?
+      out = values.dup
+      out.each_index do |i|
+        next if out[i]
+        before = (0...i).reverse_each.find { |j| values[j] }
+        after = ((i + 1)...out.size).find { |j| values[j] }
+        out[i] = (before && values[before]) || (after && values[after])
+      end
+      out
+    end
+
+    # Take the edge off a noisy anchor without flattening the curve.
+    #
+    # An equal-weight average of three anchors was too much. The whole point here
+    # is that shadows and midtones need different corrections, and averaging them
+    # together drags the strong shadow gain up into the midtones while diluting
+    # it in the shadows, so neither lands. Measured on one Portland frame: the
+    # midtones overshot to R/G 0.65 while the shadows stayed at 1.41.
+    #
+    # So the anchor keeps most of its own measurement and only borrows a little
+    # from each side.
+    CENTRE_WEIGHT = 0.7
+
+    def smooth(values)
+      side = (1.0 - CENTRE_WEIGHT) / 2.0
+      values.each_index.map do |i|
+        before = values[i - 1] if i.positive?
+        after = values[i + 1]
+        (0..2).map do |c|
+          total = values[i][c] * CENTRE_WEIGHT
+          weight = CENTRE_WEIGHT
+          if before
+            total += before[c] * side
+            weight += side
+          end
+          if after
+            total += after[c] * side
+            weight += side
+          end
+          total / weight
+        end
+      end
     end
 
     # Mean saturation of the frame as it stands. Rolls differ a lot: the Algarve
@@ -190,30 +320,5 @@ module Lomo92
       v <= 0.0031308 ? v * 12.92 : 1.055 * (v**(1 / 2.4)) - 0.055
     end
 
-    private
-
-    def gains_from_neutral(candidates, sat_pct, minimum, strength, clamp)
-      sats = candidates.map { |px| saturation(px) }
-      cut = self.class.percentile(sats.sort, sat_pct)
-      neutral = candidates.each_with_index.select { |_, i| sats[i] <= cut }.map(&:first)
-      return nil if neutral.size < minimum
-
-      sums = neutral.each_with_object([0.0, 0.0, 0.0]) do |px, acc|
-        acc[0] += px[0]
-        acc[1] += px[1]
-        acc[2] += px[2]
-      end
-      mean = sums.map { |s| s / neutral.size }
-      target = mean.sum / 3.0
-
-      # The clamp earns its keep. A real cast runs a few percent; anything wilder
-      # means the estimator locked onto something coloured rather than a neutral.
-      # One frame on the reference roll asks for 2.4x on red. Clamping leaves it
-      # under-corrected instead of ruined.
-      mean.map do |m|
-        g = 1.0 + strength * (target / [m, 1e-6].max - 1.0)
-        g.clamp(1.0 / clamp, clamp)
-      end
-    end
   end
 end

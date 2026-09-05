@@ -8,6 +8,9 @@ module Lomo92
   # first. See the README for the measurements behind each step.
   class Pipeline
     LUMA = [0.2126, 0.7152, 0.0722].freeze
+    # A second balancing pass after vibrance, applied gently. At full strength
+    # it doubles up on the first and pushes corrected bands past neutral.
+    SECOND_PASS = 0.35
 
     def initialize(options)
       @o = options
@@ -22,8 +25,8 @@ module Lomo92
 
       # Balance before the vibrance boost, since vibrance scales distance from
       # grey and would multiply any cast along with the colour we actually want.
-      linear = apply_gains(linear, measured.highlight_gains(@o[:wb], @o[:wb_clamp]))
-      linear = apply_shadow_gains(linear, measured.shadow_gains(@o[:shadow_wb]))
+      linear = apply_tone_gains(linear, measured.tone_gains(@o[:wb], @o[:wb_clamp],
+                                                            @o[:shadow_wb]))
       linear = vibrance(linear, vibrance_amount(measured), @o[:knee])
 
       # And balance again afterwards. Vibrance lifts low-chroma pixels hardest,
@@ -31,7 +34,8 @@ module Lomo92
       # an error the boost then amplifies. Doing both roughly halves the
       # frame-to-frame spread; doing only one made it worse than not doing it.
       after = Measurements.new(linear)
-      linear = apply_gains(linear, after.highlight_gains(@o[:wb], @o[:wb_clamp]))
+      linear = apply_tone_gains(linear, after.tone_gains(@o[:wb] * SECOND_PASS,
+                                                         @o[:wb_clamp], @o[:shadow_wb]))
 
       srgb = Colour.to_srgb(linear)
       points = Measurements.new(srgb).endpoints(@o[:black], @o[:white], @o[:neutral],
@@ -51,18 +55,42 @@ module Lomo92
       measured.vibrance_for(@o[:target_saturation], @o[:knee], @o[:max_vibrance])
     end
 
-    def apply_gains(image, gains)
-      gains ? image * gains : image
-    end
-
-    # Fade the shadow correction out as pixels brighten, so it leaves highlights
-    # alone. The falloff is smooth because a hard cutoff shows up as a band.
-    def apply_shadow_gains(image, gains)
+    # Apply the per-anchor gains as a curve indexed by brightness.
+    #
+    # Each channel gets a 256-entry lookup built by interpolating between the
+    # anchors, then every pixel is scaled by whatever its own luma looks up.
+    # That gives a per-channel curve instead of a flat multiplier, so a frame
+    # whose shadows and highlights are cast in different directions can have
+    # both corrected at once.
+    def apply_tone_gains(image, gains)
       return image unless gains
       y = luma_of(image)
-      weight = Colour.clamp01((y * -1.0 + 0.30) / 0.30)**1.5
-      scale = gains.map { |g| g - 1.0 }
-      image * (weight * scale + 1.0)
+      index = Colour.clamp01(y).linear(255.0, 0.0).cast(:uchar)
+      bands = (0..2).map do |c|
+        lut = Vips::Image.new_from_array([build_curve(gains, c)])
+        image[c] * index.maplut(lut)
+      end
+      bands[0].bandjoin([bands[1], bands[2]])
+    end
+
+    # Expand the handful of anchor gains into one entry per possible luma value,
+    # interpolating in the same linear light the anchors were measured in.
+    def build_curve(gains, channel)
+      anchors = Measurements::TONE_ANCHORS
+      (0..255).map do |i|
+        y = Colour.srgb_to_linear_scalar(i / 255.0)
+        if y <= anchors.first
+          gains.first[channel]
+        elsif y >= anchors.last
+          gains.last[channel]
+        else
+          hi = anchors.index { |a| a >= y }
+          lo = hi - 1
+          span = anchors[hi] - anchors[lo]
+          t = span.zero? ? 0.0 : (y - anchors[lo]) / span
+          gains[lo][channel] * (1 - t) + gains[hi][channel] * t
+        end
+      end
     end
 
     # Vibrance, not flat saturation. These scans are bleached, so washed out

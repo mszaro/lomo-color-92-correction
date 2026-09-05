@@ -111,27 +111,33 @@ flat frame being pulled to full range, since spreading 31% of the scale across
 all of it mostly magnifies grain, and the chroma blur radius scales with image
 width so a half-size scan does not get its colour smeared.
 
-### There is also a per-frame cast, and a shadow cast
+### The cast changes with brightness, so the correction is a curve
 
-Separately from the global bleaching, bright near-neutral pixels vary across the
-roll with **sd 0.067 in R/G and 0.061 in B/G**, an order of magnitude above
-measurement noise. Small, but visible once the chroma is back.
+Some rolls carry a cast that reverses across the tone range. One Portland roll
+measures neutral highlights, R/G 1.31 in the midtones and 2.16 in the shadows. A
+single gain cannot fix that: neutralising its highlights warms the whole frame
+and drives those already-red midtones further red, which is what a global
+correction did here and why the results still looked redshifted.
 
-`highlight_gains` measures it from bright, low-saturation pixels: white walls,
-pale stone, cloud. That is safer than grey-world because it never assumes the
-scene averages grey, only that something white-ish is in shot. A frame with no
-such reference is left alone rather than guessed at.
+So the cast is measured at seven anchors from deep shadow to highlight, and the
+gains become a per-channel curve applied by brightness. On a roll whose cast is
+roughly uniform the curve comes out nearly flat and behaves like a single gain;
+on one like the Portland roll it bends hard, asking for R 0.65 in the shadows and
+R 1.15 in the highlights at once.
 
-Balancing the highlights then leaves the *shadows* wherever the film put them,
-and on this stock that is strongly yellow. Mid-shadow B/G measures 0.36 to 0.84
-on the worst frames, where open shade lit by blue sky should sit above 1.0. So
-there is a second grey balance point for the shadows, faded out by tone. Two
-balance points make it a per-channel curve rather than one flat gain, which is
-the only thing that can fix a cast differing between shadows and highlights.
+Each anchor is trusted according to whether its colour looks like a cast or like
+the scene. Saturation alone cannot tell those apart, since in the shadows the
+cast is itself what makes pixels saturated. What separates them is direction: a
+cast pushes every pixel the same way, while real scene colour points all over.
+So an anchor's weight is the alignment of its pixels' colour vectors, which
+scores near 1 on a uniformly cast band and near 0 on brick, foliage and sky
+sitting together.
 
-Gains are clamped (`--wb-clamp`). One frame's estimator asks for 2.41x on red,
-which is not a correction but a failed estimate locking onto something coloured.
-Clamping leaves that frame under-corrected instead of ruined.
+Midtones are corrected more gently than shadows regardless. Down in the shadows
+the cast dominates and there is little real colour to lose, but in the midtones a
+cast and warm light are indistinguishable from one frame, and correcting them as
+hard as the shadows pushed them from too red straight through neutral to R/G
+0.65.
 
 ![Sky before and after](examples/000060-before-after.jpg)
 
