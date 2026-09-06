@@ -85,59 +85,35 @@ ever have fixed it.
 So the boost tapers with existing chroma, full strength near grey and halving at
 `--knee`. Bleached midtones get rescued, subjects that still had colour do not.
 
-### Every frame is measured and corrected on its own terms
+### Two passes: the roll, then the frame
 
-Nothing here is a fixed recipe. Each frame gets read first, and the corrections
-are solved for that frame: its colour cast from its own near-neutral pixels, its
-shadow cast from its own shadows, and the vibrance solved by bisection until the
-frame is predicted to land on `--target-saturation`.
+The scan error belongs to the roll. The colours belong to the scenes. They are
+estimated separately.
 
-That matters because rolls arrive in very different states. 
-I have tested this across a couple of rolls, from different locations,
-developed by different labs. They all display the same problem with this
-filmstock although not exactly in the same way.
+Pass one reads every frame and measures what the scan got wrong. One frame cannot
+show this, because its statistics follow its subject, and a dark treeline or a
+wide sky will capture any per-frame estimate. Across a roll the subjects vary and
+the scan error does not.
 
-| roll | source saturation | corrected |
-|---|---|---|
-| Algarve, lab A | 0.268 | **0.488** |
-| Portland, lab B | 0.423 | **0.484** |
+A negative inverted through the wrong profile comes back with the three channels'
+black points tens of levels apart. No gain fixes that, since a channel whose black
+point is misplaced needs a curve. Each channel's roll-wide distribution is
+therefore matched to the average of the three, which corrects the shape of its
+transfer rather than sliding it along, and takes out the black point, a collapsed
+channel and a tone-dependent cast in one step. Matching distributions is not the
+same as matching means, which is grey-world and fails here for the reason above.
 
-A frame that already carries colour gets a vibrance of 1.0 and is left alone; a
-bleached one gets the full boost. Both end up in the same place, which is what a
-fixed multiplier cannot do.
+Two limits stop it overreaching. It scales with measured damage: how far apart
+the channels sit decides how much is applied, so a roll whose channels already
+agree is left nearly alone. And it fades out toward white, because the highlights
+on this stock come back close to neutral already.
 
-Frames are also protected from being over-corrected. `--max-stretch` stops a very
-flat frame being pulled to full range, since spreading 31% of the scale across
-all of it mostly magnifies grain, and the chroma blur radius scales with image
-width so a half-size scan does not get its colour smeared.
-
-### The cast changes with brightness, so the correction is a curve
-
-Some rolls carry a cast that reverses across the tone range. One Portland roll
-measures neutral highlights, R/G 1.31 in the midtones and 2.16 in the shadows. A
-single gain cannot fix that: neutralising its highlights warms the whole frame
-and drives those already-red midtones further red, which is what a global
-correction did here and why the results still looked redshifted.
-
-So the cast is measured at seven anchors from deep shadow to highlight, and the
-gains become a per-channel curve applied by brightness. On a roll whose cast is
-roughly uniform the curve comes out nearly flat and behaves like a single gain;
-on one like the Portland roll it bends hard, asking for R 0.65 in the shadows and
-R 1.15 in the highlights at once.
-
-Each anchor is trusted according to whether its colour looks like a cast or like
-the scene. Saturation alone cannot tell those apart, since in the shadows the
-cast is itself what makes pixels saturated. What separates them is direction: a
-cast pushes every pixel the same way, while real scene colour points all over.
-So an anchor's weight is the alignment of its pixels' colour vectors, which
-scores near 1 on a uniformly cast band and near 0 on brick, foliage and sky
-sitting together.
-
-Midtones are corrected more gently than shadows regardless. Down in the shadows
-the cast dominates and there is little real colour to lose, but in the midtones a
-cast and warm light are indistinguishable from one frame, and correcting them as
-hard as the shadows pushed them from too red straight through neutral to R/G
-0.65.
+Pass two works per frame. With the systematic error gone, what is left is lighting
+and subject, which a frame can judge: its residual cast, its saturation, its black
+and white points. Vibrance is solved by bisection, so a frame that already carries
+colour is left alone while a bleached one gets the full boost. `--max-stretch`
+keeps a very flat frame from being pulled to full range, and the chroma blur
+radius scales with image width.
 
 ![Sky before and after](examples/000060-before-after.jpg)
 
@@ -166,7 +142,8 @@ Red chroma noise on one frame went 4.64 to 1.19.
 ## Pipeline
 
 ```
-white balance -> vibrance -> white balance -> endpoints -> contrast -> chroma denoise
+roll profile | white balance -> vibrance -> white balance -> endpoints -> contrast -> denoise
+ once a roll | ------------------------ every frame ------------------------
 ```
 
 Colour work happens in linear light, where a gain is what it claims to be. Tone
@@ -190,6 +167,7 @@ boost amplifies. Measured over 13 frames:
 
 | flag | default | note |
 |---|---|---|
+| `--roll-profile` | 0.85 | whole-roll scan correction; scaled by measured damage |
 | `--target-saturation` | 0.42 | solved per frame; the main control |
 | `-S, --saturation` | — | fixed vibrance instead of solving for a target |
 | `--max-vibrance` | 3.0 | ceiling on the solved vibrance |
