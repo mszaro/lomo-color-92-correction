@@ -3,6 +3,7 @@ require "vips"
 require_relative "lomo92/version"
 require_relative "lomo92/colour"
 require_relative "lomo92/measurements"
+require_relative "lomo92/roll_profile"
 require_relative "lomo92/pipeline"
 
 # Re-balance lab scans of Lomography LomoChrome Color '92.
@@ -22,6 +23,7 @@ module Lomo92
     black: 0.4,
     white: 99.7,
     neutral: 0.0,
+    roll_profile: 0.85,
     wb: 1.0,
     wb_clamp: 1.55,
     shadow_wb: 0.8,

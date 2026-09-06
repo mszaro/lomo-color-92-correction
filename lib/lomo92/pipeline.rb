@@ -12,12 +12,19 @@ module Lomo92
     # it doubles up on the first and pushes corrected bands past neutral.
     SECOND_PASS = 0.35
 
-    def initialize(options)
+    def initialize(options, roll_profile = nil)
       @o = options
+      @roll = roll_profile
     end
 
     def call(path)
-      linear = Colour.to_linear(Colour.load(path))
+      srgb_in = Colour.load(path)
+
+      # Pass one: undo what this roll's scan got wrong. Estimated once across
+      # every frame, so it carries no assumption about any single picture.
+      srgb_in = apply_roll_profile(srgb_in)
+
+      linear = Colour.to_linear(srgb_in)
 
       # Colour work is measured and applied in linear light, where a gain is
       # what it claims to be. Tone work happens later in display space instead.
@@ -25,6 +32,9 @@ module Lomo92
 
       # Balance before the vibrance boost, since vibrance scales distance from
       # grey and would multiply any cast along with the colour we actually want.
+      # Pass two: this frame's own character. The roll profile has already taken
+      # out the systematic error, so what remains is lighting and subject, and
+      # this only needs to nudge rather than rebuild.
       linear = apply_tone_gains(linear, measured.tone_gains(@o[:wb], @o[:wb_clamp],
                                                             @o[:shadow_wb]))
       linear = vibrance(linear, vibrance_amount(measured), @o[:knee])
@@ -47,6 +57,20 @@ module Lomo92
 
     private
 
+    def apply_roll_profile(srgb)
+      return srgb unless @roll
+      luts = @roll.vips_luts
+      index = (Colour.clamp01(srgb) * 255.0).cast(:uchar)
+      bands = (0..2).map { |c| index[c].maplut(luts[c]) }
+      rejoin(bands)
+    end
+
+    # Rebuilding an image band by band loses the sRGB tag, and vips then writes
+    # the file as greyscale however many bands it has. Put the tag back.
+    def rejoin(bands)
+      bands[0].bandjoin([bands[1], bands[2]]).copy(interpretation: :srgb)
+    end
+
     # Either a fixed boost, or solve per frame for the target saturation. The
     # second is the default because rolls arrive at very different starting
     # points and a single number cannot suit all of them.
@@ -65,12 +89,25 @@ module Lomo92
     def apply_tone_gains(image, gains)
       return image unless gains
       y = luma_of(image)
-      index = Colour.clamp01(y).linear(255.0, 0.0).cast(:uchar)
+
+      # Blur the luma before looking anything up. Grain is high-frequency luma,
+      # so indexing on a pixel's own value makes a bright speck and its dark
+      # neighbour read different points on the curve and come back different
+      # colours. That turns luma noise into colour noise, which showed up as
+      # warm grain sitting on a cooled base. The cast follows scene brightness,
+      # not individual grains.
+      guide = y.gaussblur(2.0)
+
+      # The index is sRGB-encoded, matching how build_curve fills each entry.
+      # Indexing on linear luma while filling by sRGB reads the curve at the
+      # wrong place entirely: a treeline at linear 0.054 was picking up the gain
+      # meant for 0.004, a band four stops darker.
+      index = (Colour.to_srgb(guide) * 255.0).cast(:uchar)
       bands = (0..2).map do |c|
         lut = Vips::Image.new_from_array([build_curve(gains, c)])
         image[c] * index.maplut(lut)
       end
-      bands[0].bandjoin([bands[1], bands[2]])
+      rejoin(bands)
     end
 
     # Expand the handful of anchor gains into one entry per possible luma value,

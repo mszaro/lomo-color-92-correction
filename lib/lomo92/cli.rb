@@ -53,6 +53,17 @@ module Lomo92
       FileUtils.mkdir_p(preview_dir) if options[:jpeg]
 
       overrides = load_overrides(options[:overrides])
+
+      # Pass one runs over the whole roll before any frame is written, so every
+      # frame is corrected against the same understanding of the scan.
+      roll = nil
+      if options[:roll_profile].positive?
+        all = find_files(source, nil)
+        puts "profiling roll from #{all.size} frames..."
+        roll = RollProfile.new(all, strength: options[:roll_profile])
+        puts roll.report
+      end
+
       puts "processing #{files.size} frames -> #{destination}"
       files.each_with_index do |path, i|
         name = File.basename(path)
@@ -61,7 +72,7 @@ module Lomo92
         # very flat or very dark ones, where stretching to full range does more
         # harm than leaving them a bit low-key.
         frame_options = options.merge(overrides[stem_key] || {})
-        result = Pipeline.new(frame_options).call(path)
+        result = Pipeline.new(frame_options, roll).call(path)
         stem = File.basename(name, ".*")
         # The pipeline works in float 0..1, so scale up rather than bit-shift.
         (result * 65535).cast(:ushort).tiffsave(File.join(destination, "#{stem}.tiff"),
@@ -123,6 +134,10 @@ module Lomo92
         opts.on("--knee FLOAT", Float,
                 "Chroma at which the vibrance boost halves (default #{options[:knee]}).",
                 "Lower values protect already-colourful subjects more.") { |v| options[:knee] = v }
+        opts.on("--roll-profile FLOAT", Float,
+                "Strength of the whole-roll scan correction, 0-1 (default #{options[:roll_profile]}).",
+                "Measured once across every frame, so scene colour cancels and",
+                "the scan error is what is left. 0 disables it.") { |v| options[:roll_profile] = v }
         opts.on("-w", "--wb FLOAT", Float,
                 "Per-frame white balance strength, 0 to 1 (default #{options[:wb]}).",
                 "Measured from bright near-neutral pixels. 0 disables it.") { |v| options[:wb] = v }
