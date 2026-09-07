@@ -28,7 +28,6 @@ module Lomo92
     LUMA = [0.2126, 0.7152, 0.0722].freeze
     INSET = 0.05
     BINS = 256
-    SAMPLES_PER_FRAME = 120_000
 
     attr_reader :luts, :frames, :signature
 
@@ -88,23 +87,32 @@ module Lomo92
 
     private
 
+    # Count one frame into the running histogram.
+    #
+    # This deliberately avoids Colour.load. That opens for random access and
+    # converts to float, which costs about 300MB on a 25 megapixel scan, and
+    # profiling a whole roll of them exhausts memory. Here the file is only ever
+    # read once, front to back, so sequential access lets vips stream it in
+    # slices and keep almost nothing.
+    #
+    # hist_find does the counting in C, so no pixel data crosses into Ruby.
     def accumulate(hist, path)
-      image = Colour.load(path)
+      image = Vips::Image.new_from_file(path, access: :sequential)
+      image = image.bandjoin([image, image]) if image.bands == 1
+      image = image[0..2] if image.bands > 3
+
       w = image.width
       h = image.height
       dx = (w * INSET).to_i
       dy = (h * INSET).to_i
-      inner = image.extract_area(dx, dy, w - 2 * dx, h - 2 * dy)
+      counts = image.extract_area(dx, dy, w - 2 * dx, h - 2 * dy)
+                    .cast(:uchar).hist_find
 
-      factor = Math.sqrt(inner.width * inner.height / SAMPLES_PER_FRAME.to_f).floor
-      inner = inner.subsample(factor, factor) if factor > 1
-
-      raw = (inner * (BINS - 1)).cast(:uchar).write_to_memory.unpack("C*")
-      bands = inner.bands
-      raw.each_slice(bands) do |px|
-        hist[0][px[0]] += 1
-        hist[1][px[1]] += 1
-        hist[2][px[2]] += 1
+      BINS.times do |v|
+        px = counts.getpoint(v, 0)
+        hist[0][v] += px[0]
+        hist[1][v] += px[1]
+        hist[2][v] += px[2]
       end
     end
 

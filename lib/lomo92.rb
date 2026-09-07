@@ -1,5 +1,11 @@
 require "vips"
 
+# vips caches computed operations, which is a win on one image and a slow leak
+# across a long batch. Cap it: every frame here is a fresh pipeline, so there is
+# nothing worth keeping between them.
+Vips.cache_set_max(0)
+Vips.cache_set_max_mem(256 * 1024 * 1024)
+
 require_relative "lomo92/version"
 require_relative "lomo92/colour"
 require_relative "lomo92/measurements"
