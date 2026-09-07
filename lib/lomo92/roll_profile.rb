@@ -35,20 +35,21 @@ module Lomo92
       @strength = strength
       @frames = paths.size
       hist = Array.new(3) { Array.new(BINS, 0.0) }
+      @per_frame = []
 
       paths.each_with_index do |path, i|
-        accumulate(hist, path)
+        @per_frame << accumulate(hist, path)
         print "\r  profiling #{i + 1}/#{paths.size}" if verbose
       end
       puts if verbose
 
       @signature = describe(hist)
+      @agreement = agreement_curve
       @divergence = divergence_of(hist)
-      @applied = strength * damage_weight(@divergence)
       @luts = build_luts(hist)
     end
 
-    attr_reader :divergence, :applied
+    attr_reader :divergence, :agreement
 
     # How far apart the three channels sit, as a fraction of full scale.
     #
@@ -78,19 +79,6 @@ module Lomo92
       spreads.sum / spreads.size
     end
 
-    # Below CLEAN the channels agree well enough to leave alone; above BROKEN the
-    # scan is clearly inverted wrong and gets the full correction.
-    CLEAN = 0.045
-    BROKEN = 0.115
-
-    def damage_weight(d)
-      return 0.0 if d <= CLEAN
-      return 1.0 if d >= BROKEN
-
-      t = (d - CLEAN) / (BROKEN - CLEAN)
-      t * t * (3 - 2 * t)
-    end
-
     private
 
     # Count one frame into the running histogram.
@@ -114,12 +102,15 @@ module Lomo92
       counts = image.extract_area(dx, dy, w - 2 * dx, h - 2 * dy)
                     .cast(:uchar).hist_find
 
+      frame = Array.new(3) { Array.new(BINS, 0.0) }
       BINS.times do |v|
         px = counts.getpoint(v, 0)
-        hist[0][v] += px[0]
-        hist[1][v] += px[1]
-        hist[2][v] += px[2]
+        3.times do |c|
+          hist[c][v] += px[c]
+          frame[c][v] = px[c]
+        end
       end
+      frame.map { |h| to_cdf(h) }
     end
 
     # Where each channel sits, so the profile can be reported rather than
@@ -159,36 +150,79 @@ module Lomo92
       (0..2).map do |c|
         raw = Array.new(BINS) { |v| invert(target, cdfs[c][v]) }
         blended = raw.each_with_index.map do |mapped, v|
-          v + (mapped - v) * @applied * highlight_taper(v)
+          v + (mapped - v) * @strength * @agreement[v]
         end
         monotonic(smooth(blended))
       end
     end
 
-    # Confine the roll correction to the shadows.
+    # How much the frames agree about the channel imbalance, level by level.
     #
-    # The failure this fixes is the blue record collapsing in the dark end, where
-    # it bottoms out near zero while red still has plenty left. That is a defect:
-    # scaling a channel that has hit the floor cannot recover it, and only a
-    # curve puts its black point back.
+    # This is what separates a scan fault from the subject, and it is the only
+    # thing that reliably does. A fault is in every frame of the roll: if the
+    # blue record bottoms out, it bottoms out whatever was pointed at. Scene
+    # colour is not - a blue sky is in some frames and not others, so the
+    # imbalance it produces swings wildly between them.
     #
-    # Higher up, the same measurement stops being trustworthy. Highlights already
-    # measure neutral on every roll examined, and midtone differences between
-    # channels are as likely to be the subject as the scan - a roll full of sky
-    # and blue tiles really does hold more blue. Correcting there warmed white
-    # walls to cream and turned pale stone orange.
+    # So at each level the per-frame imbalances are collected, and the systematic
+    # part is kept in proportion to how much it outweighs the scatter. Where the
+    # frames agree, that is the scan and it gets corrected. Where they disagree,
+    # that is the pictures and it is left alone.
     #
-    # So this acts fully on the shadows and fades out by the midtones, leaving
-    # the rest to the per-frame pass, which can see the scene.
-    TAPER_START = 55
-    TAPER_END = 165
+    # This replaces a hand-set taper. A fixed cutoff had to be tuned against one
+    # roll and then mis-served the other, since a badly inverted scan stays wrong
+    # well into the midtones while a healthy one is only slightly off in the
+    # shadows. Measuring where the evidence is makes that adjust itself.
+    PROBES = [0.01, 0.02, 0.04, 0.08, 0.15, 0.25, 0.4, 0.55, 0.7, 0.85, 0.95]
 
-    def highlight_taper(value)
-      return 1.0 if value <= TAPER_START
-      return 0.0 if value >= TAPER_END
+    def agreement_curve
+      return Array.new(BINS, 0.0) if @per_frame.size < 4
 
-      t = (value - TAPER_START).to_f / (TAPER_END - TAPER_START)
-      0.5 * (1 + Math.cos(Math::PI * t))
+      points = PROBES.map do |q|
+        offsets = @per_frame.map do |cdfs|
+          vals = cdfs.map { |cdf| invert(cdf, q) }
+          centre = vals.sum / 3.0
+          vals.map { |v| v - centre }          # per frame, so exposure cancels
+        end
+
+        signal = 0.0
+        scatter = 0.0
+        (0..2).each do |c|
+          col = offsets.map { |o| o[c] }
+          mu = col.sum / col.size
+          var = col.sum { |v| (v - mu)**2 } / col.size
+          signal += mu * mu
+          scatter += var
+        end
+        # Shrinkage: all signal and no scatter gives 1, all scatter gives 0.
+        weight = signal <= 0 ? 0.0 : signal / (signal + scatter)
+        [level_at(q), weight]
+      end
+
+      interpolate(points)
+    end
+
+    # Where a quantile of the roll's tones falls on the 0-255 scale, so the
+    # agreement measured in quantile space can be applied in value space.
+    def level_at(q)
+      green = @signature[1]
+      (green[:p1] + (green[:p99] - green[:p1]) * q).clamp(0, BINS - 1)
+    end
+
+    def interpolate(points)
+      pts = points.sort_by(&:first)
+      Array.new(BINS) do |v|
+        if v <= pts.first[0] then pts.first[1]
+        elsif v >= pts.last[0] then pts.last[1]
+        else
+          i = pts.index { |p| p[0] >= v }
+          a = pts[i - 1]
+          b = pts[i]
+          span = b[0] - a[0]
+          t = span <= 0 ? 0.0 : (v - a[0]).to_f / span
+          a[1] * (1 - t) + b[1] * t
+        end
+      end
     end
 
     def to_cdf(h)
@@ -241,8 +275,10 @@ module Lomo92
 
     def report
       names = %w[R G B]
-      lines = [format("roll profile from %d frames: channel divergence %.3f -> applying %.0f%%",
-                      frames, divergence, applied * 100)]
+      shadow = @agreement[(BINS * 0.15).to_i]
+      mid = @agreement[(BINS * 0.5).to_i]
+      lines = [format("roll profile from %d frames: frames agree %.0f%% in shadows, %.0f%% in midtones",
+                      frames, shadow * 100, mid * 100)]
       (0..2).each do |c|
         s = signature[c]
         shift = [1, 128, 250].map { |v| (luts[c][v] - v).round }
