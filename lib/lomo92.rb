@@ -29,6 +29,8 @@ module Lomo92
     black: 0.4,
     white: 99.7,
     neutral: 0.0,
+    format: nil,
+    quality: 98,
     roll_profile: 0.85,
     wb: 1.0,
     wb_clamp: 1.55,

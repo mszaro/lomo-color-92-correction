@@ -14,15 +14,20 @@ corrections that you would want, if you were scanning it yourself in SilverFast.
 
 ![Buildings before and after](examples/000046-before-after.jpg)
 
+![City before and after](examples/000589220033-before-after.jpg)
+
+![Bridge before and after](examples/000589220012-before-after.jpg)
+
 *Before, after. Same frames.*
 
 ```bash
-lomo92fix ~/scans/"47791 Lomography Color 92" --jpeg
+lomo92fix ~/scans/"47791 Lomography Color 92"
 ```
 
-Writes 16-bit TIFFs to a sibling `… - corrected` directory, plus preview JPEGs
-with `--jpeg`. Originals are never touched, and it refuses to write into the
-source directory.
+Writes corrected frames to a sibling `… - corrected` directory, in the same
+format they came in as: a TIFF scan stays a 16-bit TIFF, a JPEG scan stays a
+JPEG. `--format` overrides that, `--previews` adds 1600px preview JPEGs.
+Originals are never touched, and it refuses to write into the source directory.
 
 ---
 
@@ -183,6 +188,8 @@ boost amplifies. Measured over 13 frames:
 | `-n, --neutral` | 0.0 | grey-world share; leave at 0, see above |
 | `-o, --out` | sibling dir | destination |
 | `--jpeg` | off | also write 1600px previews |
+| `-f, --format` | match input | force `tiff`, `jpeg` or `png` output |
+| `--quality` | 98 | JPEG quality; 4:4:4 chroma always |
 | `--only` | — | glob filter, e.g. `'0000[45]*'` |
 | `--overrides` | — | YAML or JSON of per-frame settings |
 
