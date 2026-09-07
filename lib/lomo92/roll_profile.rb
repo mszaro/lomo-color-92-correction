@@ -62,9 +62,15 @@ module Lomo92
     # 51/36/0 on one Portland roll, a spread of 51 levels, against 27/34/20 on
     # the Algarve roll, a spread of 14. The first is a scan inverted through the
     # wrong profile; the second is broadly fine and wants leaving alone.
+    # Measured at the dark end only, because that is where damage and scene
+    # colour can be told apart. A wrong inversion misplaces the black point, and
+    # nothing in a photograph pins the darkest few percent to one hue. Midtones
+    # and highlights cannot make that distinction: a roll shot around sky, sea
+    # and blue tiles genuinely carries more blue up there, and reading that as
+    # damage warmed its stonework into orange.
     def divergence_of(hist)
       cdfs = hist.map { |h| to_cdf(h) }
-      marks = [0.02, 0.1, 0.25, 0.5, 0.75]
+      marks = [0.01, 0.02, 0.05]
       spreads = marks.map do |q|
         vals = cdfs.map { |cdf| invert(cdf, q) }
         (vals.max - vals.min) / (BINS - 1).to_f
@@ -159,18 +165,23 @@ module Lomo92
       end
     end
 
-    # Leave the highlights alone.
+    # Confine the roll correction to the shadows.
     #
-    # Highlight neutrality measures 0.98 to 1.03 in R/G on all three rolls, from
-    # two different labs, so the bright end of these scans is already right and
-    # only the shadows and midtones are wrong. Matching whole distributions would
-    # still shuffle the highlights, and on a roll that leans blue overall (a lot
-    # of sky and sea) that came back as a warm cast on white walls.
+    # The failure this fixes is the blue record collapsing in the dark end, where
+    # it bottoms out near zero while red still has plenty left. That is a defect:
+    # scaling a channel that has hit the floor cannot recover it, and only a
+    # curve puts its black point back.
     #
-    # So the correction fades out toward white, which puts it where the error
-    # actually is and protects what was never broken.
-    TAPER_START = 200
-    TAPER_END = 250
+    # Higher up, the same measurement stops being trustworthy. Highlights already
+    # measure neutral on every roll examined, and midtone differences between
+    # channels are as likely to be the subject as the scan - a roll full of sky
+    # and blue tiles really does hold more blue. Correcting there warmed white
+    # walls to cream and turned pale stone orange.
+    #
+    # So this acts fully on the shadows and fades out by the midtones, leaving
+    # the rest to the per-frame pass, which can see the scene.
+    TAPER_START = 55
+    TAPER_END = 165
 
     def highlight_taper(value)
       return 1.0 if value <= TAPER_START
