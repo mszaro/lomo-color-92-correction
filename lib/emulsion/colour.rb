@@ -29,13 +29,13 @@ module Emulsion
       (image > 1).ifthenelse(1, image)
     end
 
-    # Load as float 0..1 sRGB. Extra bands are dropped and a greyscale scan is
-    # fanned out to three channels, so the rest of the code is uniform.
+    # Load as float 0..1 sRGB, from an 8-bit or a 16-bit scan. Extra bands are
+    # dropped and a greyscale scan is fanned out to three channels.
     def load(path)
       image = Vips::Image.new_from_file(path, access: :random)
       image = image.bandjoin([image, image]) if image.bands == 1
       image = image[0..2] if image.bands > 3
-      image.cast(:float) / 255.0
+      image.cast(:float) / (image.format == :ushort ? 65535.0 : 255.0)
     end
   end
 end
