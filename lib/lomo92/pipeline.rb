@@ -12,9 +12,9 @@ module Lomo92
     # it doubles up on the first and pushes corrected bands past neutral.
     SECOND_PASS = 0.35
 
-    def initialize(options, roll_profile = nil)
+    def initialize(options, roll = nil)
       @o = options
-      @roll = roll_profile
+      @roll = roll
     end
 
     def call(path)
@@ -57,12 +57,26 @@ module Lomo92
 
     private
 
+    # The roll's colour correction: a per-channel gain that varies with
+    # brightness, since the fault does.
+    #
+    # This sits before the tonal work. Moving it after was tried, reasoning that
+    # colour ought to be corrected in the space it was measured in, and it cost
+    # blue on every frame: water fell from B/G 0.603 to 0.501 with the correction
+    # switched off either way, so the loss was the reordering, not the fit.
+    #
+    # Indexed on blurred luminance, not each pixel's own value. Grain is
+    # high-frequency luminance, so indexing per pixel hands a bright speck and
+    # its dark neighbour different gains and turns luminance noise into colour
+    # noise. The fault follows the scene's brightness, not individual grains.
     def apply_roll_profile(srgb)
       return srgb unless @roll
-      luts = @roll.vips_luts
-      index = (Colour.clamp01(srgb) * 255.0).cast(:uchar)
-      bands = (0..2).map { |c| index[c].maplut(luts[c]) }
-      rejoin(bands)
+
+      guide = (srgb * LUMA).bandmean * 3.0
+      index = (Colour.clamp01(guide).gaussblur(2.0) * 255.0).cast(:uchar)
+      curves = @roll.vips_curves
+      bands = (0..2).map { |c| srgb[c] * index.maplut(curves[c]) }
+      Colour.clamp01(rejoin(bands))
     end
 
     # Rebuilding an image band by band loses the sRGB tag, and vips then writes

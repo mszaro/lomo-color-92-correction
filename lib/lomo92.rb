@@ -9,7 +9,9 @@ Vips.cache_set_max_mem(256 * 1024 * 1024)
 require_relative "lomo92/version"
 require_relative "lomo92/colour"
 require_relative "lomo92/measurements"
-require_relative "lomo92/roll_profile"
+require_relative "lomo92/analysis_cache"
+require_relative "lomo92/roll_sample"
+require_relative "lomo92/gamut_fit"
 require_relative "lomo92/pipeline"
 
 # Re-balance lab scans of Lomography LomoChrome Color '92.
@@ -31,7 +33,7 @@ module Lomo92
     neutral: 0.0,
     format: nil,
     quality: 98,
-    roll_profile: 0.85,
+    roll_profile: 1.0,
     wb: 1.0,
     wb_clamp: 1.55,
     shadow_wb: 0.8,

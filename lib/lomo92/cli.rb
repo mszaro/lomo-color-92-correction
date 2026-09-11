@@ -1,6 +1,5 @@
 require "optparse"
 require "fileutils"
-require "json"
 require "yaml"
 
 module Lomo92
@@ -59,8 +58,22 @@ module Lomo92
       roll = nil
       if options[:roll_profile].positive?
         all = find_files(source, nil)
-        puts "profiling roll from #{all.size} frames..."
-        roll = RollProfile.new(all, strength: options[:roll_profile])
+        key = AnalysisCache.key(all)
+        cached = AnalysisCache.load(destination, key)
+        if cached
+          puts "reusing the colour fit for this roll"
+          roll = GamutFit.from_cache(cached)
+        else
+          puts "sampling roll of #{all.size} frames..."
+          # Sampled straight from the scans, since that is where the pipeline
+          # applies the correction. Measuring in one space and correcting in
+          # another makes the fit drift.
+          samples = RollSample.collect(all)
+          puts "fitting colour to reopen the roll's gamut..."
+          roll = GamutFit.new(samples)
+          AnalysisCache.save(destination, key, roll)
+        end
+        roll.strength = options[:roll_profile]
         puts roll.report
       end
 
@@ -83,7 +96,8 @@ module Lomo92
         puts "  [#{i + 1}/#{files.size}] #{name} -> #{File.basename(written)}"
       end
 
-      File.write(File.join(destination, "settings.json"), JSON.pretty_generate(options))
+      File.write(File.join(destination, "settings.yml"),
+                 YAML.dump(options.transform_keys(&:to_s)))
       puts "done"
       0
     end
@@ -121,23 +135,31 @@ module Lomo92
       end
     end
 
+    # Each frame is written under a temporary name and renamed into place only
+    # once it is complete. An interrupted run otherwise leaves a truncated file
+    # under the real name, which looks finished and is not, and gets picked up
+    # by whatever reads the folder next.
     def write_result(result, destination, stem, source_path, options)
       format = output_format(source_path, options)
       path = File.join(destination, stem + FORMATS.fetch(format))
+      partial = "#{path}.partial"
 
       case format
       when "jpeg"
         # 4:4:4, because chroma subsampling smears film grain into coloured
         # blocks - the exact artefact the rest of the pipeline works to avoid.
         (result * 255).cast(:uchar)
-          .jpegsave(path, Q: options[:quality], subsample_mode: :off,
-                          optimize_coding: true)
+          .jpegsave(partial, Q: options[:quality], subsample_mode: :off,
+                             optimize_coding: true)
       when "png"
-        (result * 65535).cast(:ushort).pngsave(path, compression: 6)
+        (result * 65535).cast(:ushort).pngsave(partial, compression: 6)
       else
-        (result * 65535).cast(:ushort).tiffsave(path, compression: :lzw)
+        (result * 65535).cast(:ushort).tiffsave(partial, compression: :lzw)
       end
+      File.rename(partial, path)
       path
+    ensure
+      File.delete(partial) if partial && File.exist?(partial)
     end
 
     # Per-frame overrides, keyed by filename without extension. Values are the
@@ -183,9 +205,9 @@ module Lomo92
                 "Chroma at which the vibrance boost halves (default #{options[:knee]}).",
                 "Lower values protect already-colourful subjects more.") { |v| options[:knee] = v }
         opts.on("--roll-profile FLOAT", Float,
-                "Strength of the whole-roll scan correction, 0-1 (default #{options[:roll_profile]}).",
-                "Measured once across every frame, so scene colour cancels and",
-                "the scan error is what is left. 0 disables it.") { |v| options[:roll_profile] = v }
+                "Strength of the whole-roll colour fit, 0-1 (default #{options[:roll_profile]}).",
+                "Fitted once across every frame to reopen a collapsed gamut;",
+                "a roll that is already healthy fits to no change. 0 disables it.") { |v| options[:roll_profile] = v }
         opts.on("-w", "--wb FLOAT", Float,
                 "Per-frame white balance strength, 0 to 1 (default #{options[:wb]}).",
                 "Measured from bright near-neutral pixels. 0 disables it.") { |v| options[:wb] = v }

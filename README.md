@@ -100,18 +100,26 @@ show this, because its statistics follow its subject, and a dark treeline or a
 wide sky will capture any per-frame estimate. Across a roll the subjects vary and
 the scan error does not.
 
-A negative inverted through the wrong profile comes back with the three channels'
-black points tens of levels apart. No gain fixes that, since a channel whose black
-point is misplaced needs a curve. Each channel's roll-wide distribution is
-therefore matched to the average of the three, which corrects the shape of its
-transfer rather than sliding it along, and takes out the black point, a collapsed
-channel and a tone-dependent cast in one step. Matching distributions is not the
-same as matching means, which is grey-world and fails here for the reason above.
+What it measures is how widely the roll's colour spreads around the hue wheel.
+Varied daylight scenes put colour in every direction. A scan that has lost a
+channel collapses that toward a line, with colour piled into two opposite hues
+and little between them. The fit adjusts red and blue against green, separately
+at a few levels of brightness, until the spread looks like a healthy roll's.
 
-Two limits stop it overreaching. It scales with measured damage: how far apart
-the channels sit decides how much is applied, so a roll whose channels already
-agree is left nearly alone. And it fades out toward white, because the highlights
-on this stock come back close to neutral already.
+It never has to decide which surfaces ought to be grey. That is the question
+grey-world gets wrong here, and picking out low-colour pixels gets it wrong too:
+on a yellow-cast frame, the genuinely blue things are the ones that look grey.
+
+Spread on its own is easy to cheat, so the fit is held back. Each change must buy
+more spread than it costs in distortion, and neighbouring brightness levels must
+roughly agree, since a scan fault changes smoothly with tone. A channel that has
+bottomed out anywhere on the roll is never turned down, because spread cannot
+tell a dying channel from a strong one and would happily finish it off. Spread
+beyond a healthy roll's counts against the fit, and a fit that narrows the colour
+is refused, so a well-scanned roll is left alone.
+
+The fit is saved beside the output as `roll-fit.yml` and reused on later runs
+over the same frames.
 
 Pass two works per frame. With the systematic error gone, what is left is lighting
 and subject, which a frame can judge: its residual cast, its saturation, its black
@@ -172,7 +180,7 @@ boost amplifies. Measured over 13 frames:
 
 | flag | default | note |
 |---|---|---|
-| `--roll-profile` | 0.85 | whole-roll scan correction; scaled by measured damage |
+| `--roll-profile` | 1.0 | strength of the whole-roll colour fit; 0 disables |
 | `--target-saturation` | 0.42 | solved per frame; the main control |
 | `-S, --saturation` | — | fixed vibrance instead of solving for a target |
 | `--max-vibrance` | 3.0 | ceiling on the solved vibrance |
@@ -195,9 +203,10 @@ boost amplifies. Measured over 13 frames:
 
 `lomo92fix --help` prints the same with explanations.
 
-TIFF, JPEG and PNG input all work. Output is always 16-bit TIFF, because the
-stretch pulls a limited set of source levels across the full range and 16 bits
-keeps later edits from compounding the gaps into banding.
+TIFF, JPEG and PNG input all work, and output matches the input unless `--format`
+says otherwise. TIFF and PNG are written at 16 bits even from an 8-bit scan,
+because the stretch pulls a limited set of source levels across the full range
+and 16 bits keeps later edits from compounding the gaps into banding.
 
 ### Per-frame overrides
 
@@ -255,6 +264,8 @@ bundle install
 - The white balance estimator needs something white-ish in shot. Given none, it
   declines to guess, which is the right failure mode but leaves that frame
   uncorrected.
+- Frames lit by street lamps come out wrong. The white balance takes the
+  brightest near-grey pixels for white, and at night those are the lamps.
 - One frame on the reference roll is a genuine outlier at R/G 0.663 where every
   other frame sits above 0.94. It needs manual work.
 
