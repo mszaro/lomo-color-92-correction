@@ -86,6 +86,10 @@ module Lomo92
         # harm than leaving them a bit low-key.
         frame_options = options.merge(overrides[stem_key] || {})
         result = Pipeline.new(frame_options, roll).call(path)
+        # Render once into memory when a preview is wanted too. Shrinking the
+        # unrendered pipeline for the preview ran all of it again, and on a
+        # 6144px frame that took 45GB.
+        result = result.copy_memory if options[:previews]
         stem = File.basename(name, ".*")
         written = write_result(result, destination, stem, path, options)
         if options[:previews]
