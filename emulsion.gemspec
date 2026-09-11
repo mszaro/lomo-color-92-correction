@@ -11,10 +11,10 @@ Gem::Specification.new do |spec|
     profile for each supported stock.
   TEXT
   spec.homepage = "https://github.com/mszaro/emulsion-profile-correction-toolkit"
-  spec.license = "MIT"
+  spec.license = "PolyForm-Noncommercial-1.0.0"
   spec.required_ruby_version = ">= 3.1"
 
-  spec.files = Dir["lib/**/*.rb", "bin/*", "profiles/*.yml", "README.md", "LICENSE"]
+  spec.files = Dir["lib/**/*.rb", "bin/*", "profiles/*.yml", "README.md", "LICENSE.md"]
   spec.bindir = "bin"
   spec.executables = ["emulsion"]
   spec.require_paths = ["lib"]

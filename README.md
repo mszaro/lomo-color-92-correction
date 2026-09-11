@@ -46,3 +46,8 @@ and the grain carries a magenta speckle.
 ![Bridge before and after](examples/000589220012-before-after.jpg)
 
 *Before, after. Same frames.*
+
+## Licence
+
+[PolyForm Noncommercial 1.0.0](LICENSE.md): free to use, change and share for
+non-commercial purposes, but not for commercial use.
