@@ -1,33 +1,20 @@
-module Lomo92
-  # Everything the pipeline needs to know about a frame before it touches it.
-  #
-  # All measuring happens on a downsampled copy. Sorting 25 million floats to
-  # find a black point is wasted work and the answer does not move.
+module Emulsion
+  # Everything the pipeline needs to know about a frame before it touches it,
+  # measured on a sample of its pixels rather than all 25 million.
   class Measurements
     LUMA = [0.2126, 0.7152, 0.0722].freeze
 
-    # The scans include a bright scanner border. Measuring it would drag the
-    # white point up, so measurements work inside a fixed inset. On this roll the
-    # border reaches 2.2% of the frame at worst, which makes 5% a safe margin.
-    #
-    # Worth knowing for other stocks: on a black and white roll the rebate is
-    # dark rather than bright, since clear base inverts to near-black. Same
-    # problem, except there it drags the black point down instead.
+    # Scans often include a bright scanner border, which would drag the white
+    # point up, so measurements stay inside a 5% inset.
     INSET = 0.05
+
+    # Every Nth pixel rather than a scaled-down copy. Scaling averages
+    # neighbours and pulls in the tails that the black and white points need.
+    TARGET_SAMPLES = 300_000
 
     attr_reader :pixels, :lumas
 
     # Expects a float sRGB image in 0..1, which is what the whole pipeline uses.
-    #
-    # Sampling takes every Nth pixel rather than scaling the image down. Scaling
-    # averages neighbours, which pulls in the tails of the histogram and would
-    # report a black point higher than the frame really has. Percentiles need the
-    # original distribution, just less of it.
-    #
-    # thumbnail_image is avoided for a second reason: it reads the sRGB tag and
-    # casts to 8-bit, which rounds these 0..1 floats to 0 or 1.
-    TARGET_SAMPLES = 300_000
-
     def initialize(image, target: TARGET_SAMPLES)
       w = image.width
       h = image.height
@@ -53,8 +40,7 @@ module Lomo92
       mx <= 1e-6 ? 0.0 : (mx - px.min) / mx
     end
 
-    # Linear interpolation between neighbouring ranks, the same convention numpy
-    # uses, so results line up with the Python original this was ported from.
+    # Linear interpolation between neighbouring ranks, as numpy does.
     def self.percentile(sorted, pct)
       return 0.0 if sorted.empty?
       rank = (pct / 100.0) * (sorted.size - 1)
@@ -68,23 +54,16 @@ module Lomo92
       self.class.percentile(values.sort, pct)
     end
 
-    # Black and white points, taken in display space rather than linear light.
-    # In linear the black end is a tiny number and the gamma on the way back
-    # re-expands everything just above it, which leaves blacks sitting near 50.
-    #
-    # Channels share one pair of endpoints by default, which lifts contrast
-    # without touching hue. Raising `neutral` moves each channel toward its own
-    # endpoints, which is grey-world by another name. See the README for why that
-    # is the wrong move on this film.
+    # Black and white points, in display space. Channels share one pair by
+    # default, which adds contrast without touching hue. Raising `neutral`
+    # gives each channel its own, which is grey-world by another name.
     def endpoints(black_pct, white_pct, neutral, max_stretch: nil)
       sorted_luma = lumas.sort
       glo = self.class.percentile(sorted_luma, black_pct)
       ghi = self.class.percentile(sorted_luma, white_pct)
 
-      # A frame that already uses very little range is not hiding a good picture
-      # inside it. Stretching a 31% frame to full range spreads about 79 source
-      # levels over 255 and mostly magnifies grain, so cap how far it goes and
-      # let a flat frame stay a little flat.
+      # A frame using very little range mostly has grain to magnify, so cap
+      # how far it is stretched and let it stay a little flat.
       if max_stretch && (ghi - glo) < 1.0 / max_stretch
         centre = (glo + ghi) / 2.0
         half = 1.0 / (2.0 * max_stretch)
@@ -100,38 +79,23 @@ module Lomo92
       end
     end
 
-    # Anchor points for the tone-dependent balance, as linear luma. Packed toward
-    # the dark end because that is where the cast moves fastest and where the eye
-    # notices it.
+    # Where the tone-dependent balance is measured, as linear luma. Packed
+    # toward the dark end, where a cast moves fastest.
     TONE_ANCHORS = [0.004, 0.012, 0.032, 0.08, 0.18, 0.36, 0.65].freeze
 
-    # How aligned a band's colours must be before it counts as a cast rather
-    # than as scene colour, and the least an anchor is ever trusted.
-    # How much of the measured correction each anchor actually gets.
-    #
-    # Shadows take the full amount: down there the film's cast dominates and
-    # there is little real colour to lose. Midtones take less, because that is
-    # where the subject lives and a cast and warm light are indistinguishable
-    # from a single frame. Correcting midtones as hard as shadows pushed them
-    # from too red straight through neutral to R/G 0.65.
+    # How much of the measured correction each anchor gets. Midtones take less,
+    # because that is where the subject is and a cast looks like warm light.
     ANCHOR_STRENGTH = [0.6, 1.0, 1.0, 0.9, 0.72, 0.65, 0.8].freeze
 
+    # How aligned a band's colours must be to count as a cast rather than as
+    # scene colour, and the least an anchor is ever trusted.
     COHERENCE_FLOOR = 0.35
     COHERENCE_FULL = 0.80
     MIN_CONFIDENCE = 0.15
 
-    # Measure the cast separately at each tone anchor, rather than once for the
-    # whole frame.
-    #
-    # A single gain cannot fix a cast that changes with brightness, and on some
-    # rolls it changes a lot. One Portland roll measures neutral highlights but
-    # R/G 1.31 in the midtones and 2.16 in the shadows. Correcting its highlights
-    # with a global gain warms everything and drives those midtones further red,
-    # which is exactly the wrong direction.
-    #
-    # Each anchor gets its own gain, measured from the least saturated pixels
-    # near that brightness so genuinely coloured subjects do not drag it. The
-    # result is a per-channel curve, which is what a tone-dependent cast needs.
+    # A gain per tone anchor rather than one for the whole frame, since a cast
+    # can change a lot with brightness. Each is measured from the least
+    # saturated pixels near that brightness, so coloured subjects do not drag it.
     def tone_gains(strength, clamp, shadow_strength = 1.0)
       return nil if strength <= 0
       raw = TONE_ANCHORS.map { |anchor| neutral_at(anchor) }
@@ -152,21 +116,9 @@ module Lomo92
       end
     end
 
-    # Mean colour of the near-neutral pixels sitting around one brightness, plus
-    # how much that reading deserves to be trusted.
-    #
-    # Confidence asks whether a band's colour is a cast or the scene.
-    #
-    # Judging that by saturation alone does not work. In the shadows the cast is
-    # itself what makes pixels saturated, so treating saturated as untrustworthy
-    # throws away the very band most in need of correction. Portland shadows sat
-    # at R/G 2.6 for exactly that reason.
-    #
-    # What separates the two is direction, not amount. A cast pushes every pixel
-    # the same way, so their colour vectors line up. Real scene colour points all
-    # over: brick one way, foliage another, sky a third. So confidence is the
-    # alignment of those vectors, near 1 when a band shares one hue and near 0
-    # when it holds many.
+    # Mean colour of the near-neutral pixels around one brightness, and how far
+    # to trust it. A cast pushes every pixel the same way while scene colour
+    # points all over, so trust comes from how well the colours line up.
     def neutral_at(anchor, width: 0.55, sat_pct: 30, minimum: 400)
       lo = anchor * (1.0 - width)
       hi = anchor * (1.0 + width) + 0.004
@@ -190,12 +142,8 @@ module Lomo92
       { mean: mean, confidence: coherence_of(band) }
     end
 
-    # How far a band's colours agree on a direction.
-    #
-    # Each pixel contributes a chroma vector; if they all point the same way the
-    # mean vector is as long as the average individual one and this returns 1.
-    # If they cancel out, it returns near 0. The whole band is used rather than
-    # the near-grey subset, since the question is about the band as a whole.
+    # How far a band's colours agree on a direction: near 1 if every pixel's
+    # colour points the same way, near 0 if they cancel out.
     def coherence_of(band)
       sum_r = 0.0
       sum_b = 0.0
@@ -233,16 +181,8 @@ module Lomo92
       out
     end
 
-    # Take the edge off a noisy anchor without flattening the curve.
-    #
-    # An equal-weight average of three anchors was too much. The whole point here
-    # is that shadows and midtones need different corrections, and averaging them
-    # together drags the strong shadow gain up into the midtones while diluting
-    # it in the shadows, so neither lands. Measured on one Portland frame: the
-    # midtones overshot to R/G 0.65 while the shadows stayed at 1.41.
-    #
-    # So the anchor keeps most of its own measurement and only borrows a little
-    # from each side.
+    # Take the edge off a noisy anchor. Each keeps most of its own measurement,
+    # since an even average dragged shadow gains up into the midtones.
     CENTRE_WEIGHT = 0.7
 
     def smooth(values)
@@ -266,19 +206,12 @@ module Lomo92
       end
     end
 
-    # Mean saturation of the frame as it stands. Rolls differ a lot: the Algarve
-    # roll measures 0.27, two Portland rolls from another lab measure 0.37 and
-    # 0.41. One fixed multiplier cannot serve both.
     def mean_saturation
       @mean_saturation ||= pixels.sum { |px| saturation(px) } / pixels.size
     end
 
-    # Solve for the vibrance amount that lands this frame on the target
-    # saturation, instead of applying a fixed boost and hoping.
-    #
-    # The knee makes the relationship non-linear, so rather than invert it this
-    # bisects on the actual sampled pixels. Twenty rounds is far more than needed
-    # and still costs nothing next to reading the file.
+    # The vibrance amount that lands this frame on the target saturation, found
+    # by bisecting on the sampled pixels. Frames already there are left alone.
     def vibrance_for(target, knee, limit)
       return 1.0 if target <= 0 || pixels.empty?
       lo = 1.0
@@ -292,12 +225,8 @@ module Lomo92
       (lo + hi) / 2.0
     end
 
-    # What the mean saturation would become at this vibrance amount.
-    #
-    # The boost happens in linear light but the answer is encoded to sRGB before
-    # measuring, because saturation means different numbers in the two spaces and
-    # the target is a display-space figure. A pixel at linear (0.5, 0.25) reads
-    # 0.50 saturated in linear and 0.27 once encoded.
+    # What the mean saturation would become at this vibrance amount, measured
+    # in sRGB because the target is a display-space figure.
     def predicted_saturation(amount, knee)
       total = 0.0
       pixels.each do |px|
@@ -319,6 +248,5 @@ module Lomo92
       return 1.0 if v >= 1.0
       v <= 0.0031308 ? v * 12.92 : 1.055 * (v**(1 / 2.4)) - 0.055
     end
-
   end
 end

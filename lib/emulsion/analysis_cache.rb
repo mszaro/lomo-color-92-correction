@@ -1,30 +1,20 @@
 require "yaml"
 require "digest"
 
-module Lomo92
-  # Remembers a roll's colour fit so it is only computed once.
+module Emulsion
+  # Remembers a roll's colour fit, kept next to the output as roll-fit.yml.
   #
-  # Sampling a whole roll and solving for its gamut is not cheap, and nothing
-  # about a roll changes between runs, so the result is kept next to the output
-  # and reused until something it depends on changes.
-  #
-  # What it depends on is the source files and the code that measures them, so
-  # both are in the key. Each file contributes its path, size and modification
-  # time, and the fitting code contributes a digest of its own source. That last
-  # part matters more than it looks: without it, changing how the fit works would
-  # quietly keep serving the old answer, and every comparison afterwards would be
-  # against a result the current code never produced.
-  #
-  # The stored gains are the raw fit, before --roll-profile scales them, so
-  # changing that setting reuses the fit rather than recomputing it.
+  # The key covers everything the fit depends on: each source file's path, size
+  # and time, the profile's healthy spread, and a digest of the fitting code, so
+  # changing how the fit works never quietly serves an old answer.
   module AnalysisCache
     module_function
 
-    VERSION = 2
+    VERSION = 3
 
     SOURCES = %w[gamut_fit.rb roll_sample.rb].freeze
 
-    def key(paths)
+    def key(paths, healthy_spread)
       files = paths.sort.map do |p|
         stat = File.stat(p)
         "#{p}:#{stat.size}:#{stat.mtime.to_i}"
@@ -32,7 +22,7 @@ module Lomo92
       code = SOURCES.map do |name|
         Digest::SHA256.file(File.join(__dir__, name)).hexdigest
       end
-      Digest::SHA256.hexdigest([VERSION, *code, *files].join("\n"))
+      Digest::SHA256.hexdigest([VERSION, healthy_spread, *code, *files].join("\n"))
     end
 
     def path(destination)
@@ -48,10 +38,12 @@ module Lomo92
       return nil unless data.is_a?(Hash) && data[:key] == key
 
       data
-    rescue Psych::Error, SystemCallError
+    rescue Psych::Exception, SystemCallError
       nil
     end
 
+    # The stored gains are the raw fit, before --roll-fit scales them, so
+    # changing the strength reuses the fit.
     def save(destination, key, fit)
       File.write(path(destination), YAML.dump(
         "key" => key,

@@ -1,55 +1,34 @@
-module Lomo92
-  # Solve for the per-channel curves that reopen a roll's collapsed colour.
+module Emulsion
+  # Solves for the per-channel curves that reopen a roll's collapsed colour.
   #
-  # Every earlier attempt here optimised "make the neutral surfaces neutral",
-  # which needs to know which surfaces are neutral - and that question is
-  # circular. Picking low-chroma pixels out of an image whose colour is exactly
-  # what is in doubt selects, on a yellow-cast frame, the genuinely blue objects
-  # and calls them grey. It does not under-read a strong cast, it inverts it.
-  #
-  # This asks something that cannot invert on itself: is the spread of colours
-  # plausible? A roll of varied daylight scenes holds colour in every direction.
-  # Measured, the badly scanned roll scores 0.591 against the healthy roll's
-  # 0.862, its colour piled into two opposite lobes with almost nothing between
-  # them. That is what losing a channel does to a distribution: it collapses from
-  # filling the plane to running along a line.
-  #
-  # So the objective is the breadth of the roll's hue distribution, and the free
-  # parameters are per-channel gains at a few tone bands. Green is held fixed as
-  # the reference, since it is the least damaged channel on this stock and
-  # something has to define the level.
+  # A roll of varied scenes holds colour in every direction. A scan that has
+  # lost a channel squashes that toward a line, so the fit adjusts red and blue
+  # at a few tone bands until the roll's hue spread looks healthy again.
   class GamutFit
     SECTORS = 12
     LUMA = [0.2126, 0.7152, 0.0722].freeze
     BAND_CENTRES = [45.0, 90.0, 140.0, 190.0].freeze
     CHROMA_FLOOR = 6.0
 
-    # Bounds and the pull back toward doing nothing. Without a penalty the fit
-    # will happily stretch colour in every direction to buy a wider spread, so
-    # the gain it offers has to be worth the distortion it costs.
+    # Bounds, and the pull back toward doing nothing. Without a penalty the fit
+    # stretches colour in every direction to buy a wider spread.
     GAIN_MIN = 0.75
     GAIN_MAX = 1.35
     PENALTY = 0.35
 
-    # A scan fault varies smoothly with brightness; it does not zigzag from one
-    # tone band to the next. Left unconstrained the fit produced exactly that
-    # zigzag and bought a spread wider than a healthy roll's, which is the giveaway
-    # that it was inventing colour variety rather than recovering it. This charges
-    # for disagreement between neighbouring bands.
+    # A scan fault changes smoothly with brightness, so neighbouring bands are
+    # charged for disagreeing. Unconstrained, the fit zigzagged between them.
     ROUGHNESS = 2.5
 
-    # Past this the fit is not restoring colour, it is manufacturing it. A
-    # well-scanned roll of the same film measures about here.
-    #
-    # The ceiling caps what the fit may GAIN. It is never allowed to drag a roll
-    # down to meet it: a healthy roll measuring 0.750 was pushed to 0.701 by an
-    # earlier version of this, over-correcting a scan that needed nothing. So the
-    # ceiling sits at whichever is higher, this figure or where the roll already
-    # was, and losing spread is refused outright.
-    PLAUSIBLE_SPREAD = 0.70
+    # Spread past the profile's healthy figure counts against the fit, since
+    # beyond that it is inventing colour rather than recovering it.
     EXCESS = 1.5
 
-    attr_reader :gains, :spread_before, :spread_after
+    # How near its floor a channel sits before it counts as clipped there.
+    FLOOR_LEVEL = 9.0
+    FLOOR_SHARE = 0.04
+
+    attr_reader :gains, :spread_before, :spread_after, :clipped, :damaged
 
     def self.from_cache(data)
       allocate.tap do |f|
@@ -60,35 +39,23 @@ module Lomo92
       end
     end
 
-    # How near its floor a channel sits before it counts as clipped there.
-    FLOOR_LEVEL = 9.0
-    FLOOR_SHARE = 0.04
-
-    attr_reader :clipped, :damaged
-
-    def initialize(samples, verbose: true)
+    # Green is held fixed as the reference, since something has to define the
+    # level. On the one film profiled so far it is also the least damaged.
+    def initialize(samples, healthy_spread:, verbose: true)
       @r, @g, @b, @y = samples
       @clipped = find_clipping
       @damaged = [@clipped.any? { |c| c[0] }, @clipped.any? { |c| c[1] }]
       @gains = Array.new(BAND_CENTRES.size) { [1.0, 1.0] }   # [red, blue] per band
       @spread_before = spread(@gains)
-      @ceiling = [PLAUSIBLE_SPREAD, @spread_before].max
+      # A roll already past the healthy figure is never dragged down to it.
+      @ceiling = [healthy_spread, @spread_before].max
       @gains = optimise(verbose)
       @spread_after = spread(@gains)
     end
 
-    # Which channels have hit their floor, band by band.
-    #
-    # This is what stops the fit going the wrong way. Spread is direction-blind:
-    # shrinking a channel widens the hue distribution exactly as well as growing
-    # it, so on its own the objective happily pulled blue DOWN on a roll whose
-    # blue was already dying. Every frame came back with better red balance and
-    # worse blue.
-    #
-    # A channel against its floor has lost signal rather than gained it, and no
-    # amount of taking more away can recover it. So where a channel is clipped,
-    # its gain is not allowed below 1: the fit may lift it or leave it, never
-    # push it further down.
+    # Which channels have hit their floor, band by band. Spread cannot tell a
+    # dying channel from a strong one, so this is what stops the fit turning a
+    # clipped channel down further.
     def find_clipping
       Array.new(BAND_CENTRES.size) { [false, false] }.tap do |flags|
         counts = Array.new(BAND_CENTRES.size) { [0, 0, 0] }
@@ -115,8 +82,8 @@ module Lomo92
       best
     end
 
-    # Breadth of the hue distribution, 1.0 if colour lands in every direction
-    # equally and 0 if it all points one way.
+    # Breadth of the hue distribution: 1.0 if colour lands in every direction
+    # equally, 0 if it all points one way.
     def spread(gains)
       counts = Array.new(SECTORS, 0.0)
       total = 0.0
@@ -151,7 +118,7 @@ module Lomo92
 
     private
 
-    # What the fit is actually worth: spread bought, minus the distortion spent.
+    # What the fit is worth: spread bought, minus the distortion spent.
     def score(gains)
       cost = gains.sum { |gr, gb| (gr - 1.0)**2 + (gb - 1.0)**2 }
 
@@ -164,15 +131,13 @@ module Lomo92
       # A correction that narrows the colour is not a correction.
       return -Float::INFINITY if s < @spread_before - 1e-6
 
-      # Credit stops accruing past what a healthy roll already looks like.
       excess = s > @ceiling ? (s - @ceiling) : 0.0
 
       s - PENALTY * cost - ROUGHNESS * roughness - EXCESS * excess
     end
 
-    # Coordinate descent. The parameter space is small and the objective is
-    # cheap, so stepping each gain up and down in turn and keeping what helps is
-    # enough; there is no call for anything cleverer.
+    # Coordinate descent: step each gain up and down in turn and keep what
+    # helps. The parameter space is small enough that nothing cleverer is needed.
     def optimise(verbose)
       best = @gains.map(&:dup)
       best_score = score(best)
@@ -185,11 +150,8 @@ module Lomo92
             2.times do |which|
               [-step, step].each do |delta|
                 trial = best.map(&:dup)
-                # A channel clipped anywhere on the roll is this scan's damaged
-                # one, and it is never reduced anywhere. Restricting only the
-                # bands where clipping shows was not enough: the fit simply took
-                # blue out of the highlights instead, where the roll holds a lot
-                # of real sky and spread is cheap to buy by throwing it away.
+                # A channel clipped anywhere on the roll is never reduced
+                # anywhere, or the fit just takes it out of the highlights.
                 floor = @damaged[which] ? 1.0 : GAIN_MIN
                 trial[band][which] = (trial[band][which] + delta).clamp(floor, GAIN_MAX)
                 next if trial[band][which] == best[band][which]
@@ -225,20 +187,18 @@ module Lomo92
 
     public
 
-    # How much of the fitted correction to apply, 0 to 1. Kept apart from the fit
-    # itself so the fit can be cached once and the strength changed freely.
+    # How much of the fit to apply, 0 to 1. Kept apart from the fit so the fit
+    # can be cached once and the strength changed freely.
     attr_writer :strength
 
     def strength
       @strength || 1.0
     end
 
-    # The fit as it will actually be applied, with strength folded in.
     def applied_gains
       @gains.map { |gr, gb| [1.0 + (gr - 1.0) * strength, 1.0 + (gb - 1.0) * strength] }
     end
 
-    # As vips lookups, indexed by the pixel's own luminance.
     def vips_curves
       curves.map { |c| Vips::Image.new_from_array([c]) }
     end

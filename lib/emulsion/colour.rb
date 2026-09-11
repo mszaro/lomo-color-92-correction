@@ -1,11 +1,8 @@
-module Lomo92
+module Emulsion
   # sRGB transfer curves, written out rather than using colourspace(:srgb).
   #
-  # libvips treats sRGB as 8-bit 0..255 and scRGB as float 0..1, so converting
-  # between them quantises and changes the numeric range under you. Everything
-  # here stays float 0..1 from load to save, which keeps the maths honest and
-  # avoids rounding to 8 bits in the middle of a pipeline that is stretching
-  # tones apart.
+  # libvips treats sRGB as 8-bit, which would round these 0..1 floats in the
+  # middle of a pipeline that is stretching tones apart. Everything stays float.
   module Colour
     module_function
 
@@ -32,8 +29,8 @@ module Lomo92
       (image > 1).ifthenelse(1, image)
     end
 
-    # Load as float 0..1 sRGB. Alpha and extra bands are dropped; a greyscale
-    # scan gets fanned out to three channels so the rest of the code is uniform.
+    # Load as float 0..1 sRGB. Extra bands are dropped and a greyscale scan is
+    # fanned out to three channels, so the rest of the code is uniform.
     def load(path)
       image = Vips::Image.new_from_file(path, access: :random)
       image = image.bandjoin([image, image]) if image.bands == 1

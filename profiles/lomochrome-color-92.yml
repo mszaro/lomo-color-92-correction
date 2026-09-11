@@ -1,0 +1,29 @@
+# LomoChrome Color '92, scanned by a lab as if it were a Kodak or Fuji stock.
+name: LomoChrome Color '92
+
+# The scans come back bleached, so each frame is boosted toward this mean
+# saturation. The boost is strongest on greyish colours and halves at the knee.
+target_saturation: 0.42
+max_vibrance: 3.0
+knee: 0.22
+
+# The whites already come back neutral, so grey-world balancing stays off.
+# The shadows come back yellow, which is what the second balance point is for.
+neutral: 0.0
+wb: 1.0
+wb_clamp: 1.55
+shadow_wb: 0.8
+
+# Black and white points sit well inside the range, so each frame is stretched.
+black: 0.4
+white: 99.7
+max_stretch: 3.2
+contrast: 0.15
+
+# Red and blue grain are several times noisier than green, so the colour
+# speckle reads magenta. Clean it hard; the luma grain is left alone.
+chroma: 0.9
+
+# How widely a well-scanned roll of this film spreads its colours. The roll
+# fit reopens a collapsed roll up to about here and no further.
+healthy_spread: 0.70

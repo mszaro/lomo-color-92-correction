@@ -1,10 +1,6 @@
 #!/usr/bin/env ruby
-# Side-by-side contact sheet of two renders of the same roll.
-#
-# Each frame appears as a pair, the first render on the left and the second on
-# the right, so a whole roll can be judged against another version of itself at
-# a glance. Frames are matched by name, and a frame missing from either side is
-# shown as missing rather than silently dropped.
+# Side-by-side contact sheet of two renders of the same roll, matched by
+# frame name, for judging one version of a correction against another.
 #
 #   compare_sheet.rb LEFT_DIR RIGHT_DIR OUT.jpg [LEFT_LABEL RIGHT_LABEL]
 

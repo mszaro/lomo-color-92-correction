@@ -1,14 +1,8 @@
-module Lomo92
-  # A representative handful of pixels from every frame in a roll.
+module Emulsion
+  # A few thousand pixels from every frame in a roll, for the colour fit.
   #
-  # The gamut fit needs to evaluate its objective hundreds of times, which rules
-  # out touching the images each round. Instead the roll is reduced once to a
-  # bag of pixels and the fit works on that.
-  #
-  # Sampling is by stride rather than by scaling. Scaling averages neighbours,
-  # which pulls the extremes toward the middle and would quietly narrow the very
-  # distribution being measured. Taking every Nth pixel leaves the distribution
-  # alone and simply holds less of it.
+  # Taken by stride rather than by scaling down, since scaling averages
+  # neighbours and would narrow the very colour spread being measured.
   class RollSample
     LUMA = [0.2126, 0.7152, 0.0722].freeze
     INSET = 0.05
